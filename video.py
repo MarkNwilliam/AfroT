@@ -1,11 +1,23 @@
 import streamlit as st
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy.editor import VideoFileClip
 import speech_recognition as sr
-from googletrans import Translator
+from pydub import AudioSegment
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+
+# Load translation model and tokenizer
+model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
+tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
+translator = pipeline('translation', model=model, tokenizer=tokenizer, src_lang="eng_Latn", tgt_lang='yor_Latn')
+
+# Function to translate long text
+def translate_long_text(long_text, max_chunk_length, translator, max_length):
+    chunks = [long_text[i:i+max_chunk_length] for i in range(0, len(long_text), max_chunk_length)]
+    translated_chunks = [translator(chunk, max_length=max_length)[0] for chunk in chunks]
+    translated_text = ''.join([chunk['translation_text'] for chunk in translated_chunks])
+    return translated_text
 
 # Streamlit interface for user input
 uploaded_file = st.file_uploader("Choose a video file")
-language = st.selectbox('Select language for subtitles', ['English', 'Spanish', 'French'])
 
 if uploaded_file is not None:
     # Save the uploaded file
@@ -17,37 +29,25 @@ if uploaded_file is not None:
     audio = video.audio
     audio.write_audiofile('extracted_audio.wav')
 
-    # Convert audio to text
+    st.write("Audio has been extracted and saved as extracted_audio.wav")
+
+    # Convert the audio to the correct format for pocketsphinx
+    audio = AudioSegment.from_wav("extracted_audio.wav")
+    audio = audio.set_channels(1)
+    audio = audio.set_frame_rate(16000)
+    audio.export("converted_audio.wav", format="wav")
+
+    st.write("Audio has been converted and saved as converted_audio.wav")
+
+    # Transcribe the audio to text
     r = sr.Recognizer()
-    audio_file = sr.AudioFile('extracted_audio.wav')
+    with sr.AudioFile('converted_audio.wav') as source:
+        audio_data = r.record(source)
+        text = r.recognize_sphinx(audio_data)
 
-    text = ""  # Initialize text as an empty string
+    # Translate the transcribed text
+    translated_text = translate_long_text(text, max_chunk_length=1000, translator=translator, max_length=400)
 
-    with audio_file as source:
-        audio = r.record(source)
-    try:
-        text = r.recognize_google(audio)
-    except sr.UnknownValueError:
-        st.write("Speech Recognition could not understand audio")
-    except sr.RequestError as e:
-        st.write("Could not request results from Google Speech Recognition service; {0}".format(e))
-
-    # Translate the text (if necessary)
-    if language != 'English':
-        translator = Translator()
-        text = translator.translate(text, dest=language).text
-
-    # Format the text into SubRip (.srt) format
-    # This is a simplified example, you'll need to split the text and add timestamps
-    subtitles = "1\n00:00:00,000 --> 00:00:10,000\n" + text
-
-    # Create a text clip from the formatted subtitle text
-    subtitle_clip = TextClip(subtitles, fontsize=24, color='white')
-
-    # Merge the original video clip and the subtitle text clip
-    final_clip = CompositeVideoClip([video, subtitle_clip.set_position(('center', 'bottom'))])
-
-    # Save the final video with subtitles as a new file
-    final_clip.write_videofile("final_video.mp4")
-
-    st.write("Subtitled video has been saved as final_video.mp4")
+    # Print the transcription and translation
+    st.write("Transcription:", text)
+    st.write("Translation:", translated_text)

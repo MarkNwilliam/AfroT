@@ -1,8 +1,12 @@
+import time
 import streamlit as st
 from moviepy.editor import VideoFileClip
 import speech_recognition as sr
 from pydub import AudioSegment
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
+from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.llms.ollama import Ollama
 
 # Function to translate long text
 def translate_long_text(long_text, max_chunk_length, translator, max_length):
@@ -10,6 +14,17 @@ def translate_long_text(long_text, max_chunk_length, translator, max_length):
     translated_chunks = [translator(chunk, max_length=max_length)[0] for chunk in chunks]
     translated_text = ''.join([chunk['translation_text'] for chunk in translated_chunks])
     return translated_text
+
+# Load documents
+documents = SimpleDirectoryReader("data").load_data()
+
+# Set models
+Settings.embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+Settings.llm = Ollama(model="phi3", request_timeout=360.0)
+
+# Create index and query engine
+index = VectorStoreIndex.from_documents(documents)
+query_engine = index.as_query_engine()
 
 # Streamlit interface for user input
 uploaded_file = st.file_uploader("Choose a video file")
@@ -32,7 +47,7 @@ if uploaded_file is not None:
         # Load translation model and tokenizer for the selected language
         model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M")
         tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
-        translator = pipeline('translation', model=model, tokenizer=tokenizer, src_lang="eng_Latn", tgt_lang=tgt_lang)
+        st.session_state.translator = pipeline('translation', model=model, tokenizer=tokenizer, src_lang="eng_Latn", tgt_lang=tgt_lang)
 
         # Progress bar
         progress_bar = st.progress(0)
@@ -58,15 +73,33 @@ if uploaded_file is not None:
         r = sr.Recognizer()
         with sr.AudioFile('converted_audio.wav') as source:
             audio_data = r.record(source)
-            text = r.recognize_sphinx(audio_data)
+            st.session_state.text = r.recognize_sphinx(audio_data)
         progress_bar.progress(75)
 
         # Translate the transcribed text
         status_text.text('Translating text...')
-        translated_text = translate_long_text(text, max_chunk_length=1000, translator=translator, max_length=400)
+        st.session_state.translated_text = translate_long_text(st.session_state.text, max_chunk_length=1000, translator=st.session_state.translator, max_length=400)
         progress_bar.progress(100)
         status_text.text('Translation complete!')
 
         # Print the transcription and translation
-        st.write("Transcription:", text)
-        st.write("Translation:", translated_text)
+        st.write("Transcription:", st.session_state.text)
+        st.write("Translation:", st.session_state.translated_text)
+
+# User input for query
+user_query = st.text_input("Enter your query:")
+
+if st.button('Run User Query'):
+    if 'response' not in st.session_state or user_query != st.session_state.prev_query:
+        # Run query
+        st.session_state.response = query_engine.query(user_query)
+        response_text = str(st.session_state.response)
+
+        # Translate response from English to the selected language
+        st.session_state.response_translated = translate_long_text(response_text, max_chunk_length=1000, translator=st.session_state.translator, max_length=400)
+
+        # Store the current query to check against next time
+        st.session_state.prev_query = user_query
+
+    # Display the response
+    st.write("Response:", st.session_state.response_translated)
